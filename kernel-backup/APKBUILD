@@ -1,0 +1,114 @@
+pkgname=linux-samsung-a12s
+pkgver=1.0
+pkgrel=0
+pkgdesc="Samsung Galaxy A12s Exynos 850 kernel from physwizz"
+arch="aarch64"
+_carch="arm64"
+_flavor="samsung-a12s"
+url="https://github.com/physwizz/a127f-T-u9"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps pmb:cross-native"
+_config="a127f-T-u9-main/arch/arm64/configs/exynos850-a12snsxx_defconfig"
+makedepends="
+        bash
+        bc
+        bison
+        clang
+        coreutils
+        devicepkg-dev
+        findutils
+        flex
+        linux-headers
+        openssl-dev
+        perl
+        python3
+        cpio
+        xz
+"
+source="main.tar.gz::https://github.com/physwizz/a127f-T-u9/archive/refs/heads/main.tar.gz
+        gcc10-extern_YYLOC_global_declaration.patch"
+sha512sums="eac85f6028f1122bc12513c4b3b9f42abde4f6d7eecd7b0a2faae4357e5e921980df07fceb9d35ee2306e78627eda806e319055509f0b0dcaaaf916f83d43527  main.tar.gz
+65ad0eb78d906dcf43ef9f3046932a06dfb140e66b1ca10ca757db74cce9abd528cf3f5bc9810bbbe6420e82e0f515727033be25053f52a59fbcdaf765ace7dd  gcc10-extern_YYLOC_global_declaration.patch"
+
+builddir="$srcdir/a127f-T-u9-main"
+_outdir="out"
+
+export CC="clang"
+export HOSTCC="clang"
+export PLATFORM_VERSION=13
+export ANDROID_MAJOR_VERSION=t
+export CROSS_COMPILE="${CROSS_COMPILE:-aarch64-alpine-linux-musl-}"
+export AS="${CROSS_COMPILE}as"
+export KCFLAGS="-fno-builtin-stpcpy"
+
+prepare() {
+        default_prepare
+
+        abuild-apk --no-progress add binutils-aarch64 gcc-aarch64 musl-aarch64 musl-dev-aarch64
+
+        mkdir -p "$builddir/toolchain-bin"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-as "$builddir/toolchain-bin/aarch64-linux-gnu-as"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-ld "$builddir/toolchain-bin/aarch64-linux-gnu-ld"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-objcopy "$builddir/toolchain-bin/aarch64-linux-gnu-objcopy"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-objdump "$builddir/toolchain-bin/aarch64-linux-gnu-objdump"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-as "$builddir/toolchain-bin/as"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-ld "$builddir/toolchain-bin/ld"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-objcopy "$builddir/toolchain-bin/objcopy"
+        ln -sf /usr/bin/aarch64-alpine-linux-musl-objdump "$builddir/toolchain-bin/objdump"
+        export PATH="$builddir/toolchain-bin:$PATH"
+
+        cat > "$builddir/clang-wrapper" << 'WRAPEOF'
+#!/bin/sh
+exec clang -B"$(dirname "$0")/toolchain-bin" "$@"
+WRAPEOF
+        chmod +x "$builddir/clang-wrapper"
+
+        cp /usr/share/devicepkg-dev/compiler-gcc.h "$builddir/include/linux/compiler-gcc.h"
+
+        # LLVM integrated-as chokes on line-continued named macro args in vdso; collapse to single line
+        perl -0pi -e 's/,\s*\\\n\s*/, /g' "$builddir/arch/arm64/kernel/vdso/gettimeofday.S"
+
+        # vdso needs real GNU-style named macro args, which LLVM integrated-as can't parse;
+        # force external assembler just for vdso, pointed at our toolchain-bin symlinks
+        sed -i "/^ccflags-y :=/a ccflags-y += -no-integrated-as -B$builddir/toolchain-bin" \
+                "$builddir/arch/arm64/kernel/vdso/Makefile"
+
+        makefiles="$(find "$builddir" -type f -name Makefile) $(find "$builddir" -type f -name Makefile.common) $(find "$builddir" -type f -name Kbuild)"
+        for i in $makefiles; do
+                sed -i 's/-Werror-/-W/g' "$i"
+                sed -i 's/-Werror=/-W/g' "$i"
+                sed -i 's/-Werror//g' "$i"
+        done
+
+        mkdir -p "$builddir/$_outdir"
+        cp "$srcdir/$_config" "$builddir/$_outdir/.config"
+        
+        # Disable Android-specific kperfmon driver that requires external Android framework files
+        sed -i 's/CONFIG_KPERFMON=y/# CONFIG_KPERFMON is not set/' "$builddir/$_outdir/.config"
+        
+        yes "" | make -C "$builddir" O="$_outdir" ARCH="$_carch" \
+                CC="$builddir/clang-wrapper" HOSTCC=clang CROSS_COMPILE="$CROSS_COMPILE" AS="$AS" KCFLAGS="$KCFLAGS" \
+                PLATFORM_VERSION=13 ANDROID_MAJOR_VERSION=t oldconfig
+}
+
+build() {
+        unset LDFLAGS
+        make O="$_outdir" ARCH="$_carch" CC="$builddir/clang-wrapper" HOSTCC=clang \
+                CROSS_COMPILE="$CROSS_COMPILE" AS="$AS" KCFLAGS="$KCFLAGS" \
+                PLATFORM_VERSION=13 ANDROID_MAJOR_VERSION=t \
+                KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-postmarketOS" \
+                -j$(nproc)
+        make O="$_outdir" ARCH="$_carch" CC="$builddir/clang-wrapper" HOSTCC=clang \
+                CROSS_COMPILE="$CROSS_COMPILE" AS="$AS" KCFLAGS="$KCFLAGS" \
+                PLATFORM_VERSION=13 ANDROID_MAJOR_VERSION=t \
+                KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-postmarketOS" \
+                -j$(nproc) dtbs
+}
+
+package() {
+        downstreamkernel_package "$builddir" "$pkgdir" "$_carch" \
+                "$_flavor" "$_outdir"
+
+        mkdir -p "$pkgdir"/boot/dtbs
+        find "$builddir/$_outdir/arch/$_carch/boot/dts" -name '*.dtb' -exec cp {} "$pkgdir"/boot/dtbs/ \;
+}
